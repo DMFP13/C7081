@@ -1,0 +1,252 @@
+---
+title: "Dairy Cow Health & Production Analysis: EDA, GAM Regression, and ML Classification"
+author: "Dan Peters"
+date: "2025-05-05"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+# Load required packages
+tidy_packages <- c(
+  "tidyverse", "mgcv", "randomForest", "e1071", 
+  "pROC", "caret", "reshape2", "shiny"
+)
+for(pkg in tidy_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Abstract
+
+This report explores the influence of Age at First Calving (AFC) on first-lactation milk yield in UK Holstein heifers and builds predictive models for second calving using Random Forest and Support Vector Machines. We use visualizations, non-linear regression, and classification performance metrics to draw conclusions.
+
+# Methods and Results
+
+## Exploratory Data Analysis
+
+```{r load_and_preprocess}
+df <- read_csv("/Users/mac1/Documents/RStudio/C7081/AFC paper data.csv") %>%
+  rename(
+    AFC = `1CalvingAgeMo`,
+    MilkYield = `1LPYld`,
+    SCC = `1LPSCC`,
+    CalvingInterval = `2CalvingInterval`
+  ) %>%
+  mutate(
+    SecondCalving = factor(if_else(is.na(CalvingInterval), "No", "Yes"), levels = c("No", "Yes")),
+    logSCC = log10(SCC + 1)
+  ) %>%
+  filter(AFC >= 21, AFC <= 42) %>%
+  drop_na(AFC, MilkYield, SCC, SecondCalving)
+```
+
+```{r plot_afc}
+ggplot(df, aes(x = AFC)) +
+  geom_histogram(bins = 30, fill = "steelblue") +
+  labs(title = "Distribution of Age at First Calving (AFC)", x = "AFC (months)", y = "Count")
+```
+
+```{r yield_by_afc_group}
+df <- df %>%
+  mutate(AFC_group = cut(AFC, breaks = c(0, 24, 30, Inf), labels = c("<=24", "25-30", ">30")))
+
+ggplot(df, aes(x = AFC_group, y = MilkYield)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Milk Yield by AFC Group", x = "AFC Group", y = "305-day Milk Yield (kg)")
+```
+
+```{r plot_scc}
+ggplot(df, aes(x = logSCC)) +
+  geom_histogram(bins = 30, fill = "darkgreen") +
+  labs(title = "Distribution of log10(SCC + 1)", x = "log10(SCC + 1)", y = "Count")
+```
+
+```{r second_calving_table}
+df %>%
+  count(SecondCalving) %>%
+  mutate(Percent = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c("Second Calving", "Count", "Percent"))
+```
+
+## GAM Regression
+
+```{r fit_gam}
+gam_model <- gam(MilkYield ~ s(AFC) + logSCC, data = df, method = "REML")
+summary(gam_model)
+```
+
+```{r plot_gam}
+plot(gam_model, se = TRUE, shade = TRUE, main = "GAM Smoothing of AFC on Milk Yield")
+```
+
+```{r gam-model-evaluation}
+# RSS, Adjusted R², BIC
+rss      <- sum(residuals(gam_model)^2)
+adj_r2   <- summary(gam_model)$r.sq
+bic_val  <- BIC(gam_model)
+
+cat("RSS:", round(rss, 2), "\n")
+cat("Adjusted R²:", round(adj_r2, 4), "\n")
+cat("BIC:", round(bic_val, 2), "\n")
+```
+
+## Predictive Modeling
+
+### Data split and model fitting
+
+```{r modeling-setup}
+set.seed(2025)
+df_model <- df %>% select(SecondCalving, MilkYield, SCC, AFC)
+df_small <- df_model %>% sample_n(5000)
+train_idx <- createDataPartition(df_small$SecondCalving, p = 0.7, list = FALSE)
+train     <- df_small[train_idx, ]
+test      <- df_small[-train_idx, ]
+
+# Random Forest
+rf_model <- randomForest(SecondCalving ~ ., data = train, ntree = 100, mtry = 2)
+rf_probs <- predict(rf_model, test, type = "prob")[, "Yes"]
+rf_preds <- predict(rf_model, test)
+rf_auc   <- roc(test$SecondCalving, rf_probs)$auc
+
+# SVM (linear)
+svm_model <- svm(SecondCalving ~ ., data = train, kernel = "linear", cost = 1, probability = TRUE)
+svm_probs <- attr(predict(svm_model, test, probability = TRUE), "probabilities")[, "Yes"]
+svm_preds <- predict(svm_model, test)
+svm_auc   <- roc(test$SecondCalving, svm_probs)$auc
+
+# Summary table
+data.frame(
+  Model    = c("Random Forest", "SVM"),
+  Accuracy = c(mean(rf_preds == test$SecondCalving), mean(svm_preds == test$SecondCalving)),
+  AUC      = c(rf_auc, svm_auc)
+)
+```
+
+### Confusion Matrices
+
+```{r confusion-matrix-fixed}
+cm_rf  <- confusionMatrix(rf_preds, test$SecondCalving,  positive = "Yes")
+cm_svm <- confusionMatrix(svm_preds, test$SecondCalving, positive = "Yes")
+
+print(cm_rf)
+print(cm_svm)
+```
+
+### Threshold Sensitivity Analysis
+
+```{r threshold-analysis-fixed}
+threshold_analysis <- function(probs, truth, thresh) {
+  preds <- factor(if_else(probs > thresh, "Yes", "No"), levels = c("No", "Yes"))
+  cm    <- confusionMatrix(preds, truth, positive = "Yes")
+  data.frame(
+    Threshold   = thresh,
+    Accuracy    = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+}
+
+thresholds <- seq(0.3, 0.8, by = 0.05)
+results_rf  <- bind_rows(lapply(thresholds, threshold_analysis, probs = rf_probs, truth = test$SecondCalving))
+
+# Plot
+library(ggplot2)
+ggplot(results_rf, aes(x = Threshold)) +
+  geom_line(aes(y = Accuracy),    size = 1) +
+  geom_line(aes(y = Sensitivity), size = 1, linetype = "dashed") +
+  geom_line(aes(y = Specificity), size = 1, linetype = "dotted") +
+  labs(title = "Threshold Sensitivity Analysis: Random Forest",
+       y = "Metric Value", x = "Threshold") +
+  theme_minimal()
+```
+
+### Model Performance Comparison Plot
+
+```{r model-performance-plot-fixed}
+model_performance <- tibble(
+  Model    = rep(c("Random Forest", "SVM"), each = 2),
+  Metric   = rep(c("Accuracy", "AUC"), times = 2),
+  Value    = c(mean(rf_preds == test$SecondCalving), rf_auc,
+               mean(svm_preds == test$SecondCalving), svm_auc)
+)
+
+ggplot(model_performance, aes(x = Metric, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  ylim(0, 1) +
+  labs(
+    title = "Model Performance Comparison: Accuracy and AUC",
+    y     = "Score",
+    x     = "Metric"
+  ) +
+  theme_minimal()
+```
+
+## Discussion and Conclusions
+
+- **EDA** shows variability in calving age and yield.
+- **GAM** revealed a non-linear influence of AFC on yield, flattening after ~36 months.
+- **RF** and **SVM** both performed well; RF had slightly higher AUC.
+- **Confusion matrices** quantify classification errors for each model.
+- **Threshold analysis** helps choose cutoffs based on sensitivity/specificity trade-offs.
+
+# Farmers Tool
+
+```{r shiny-farmer-interface, echo=FALSE}
+fluidPage(
+  titlePanel("Should I Keep or Cull This Cow?"),
+  sidebarLayout(
+    sidebarPanel(
+      numericInput("milk", "Milk Yield (kg):",  value = 5000, min = 2000, max = 12000),
+      numericInput("scc",  "Somatic Cell Count (SCC):", value = 150,  min = 50,   max = 1000),
+      numericInput("afc",  "Age at First Calving (months):", value = 30,   min = 18,   max = 48),
+      actionButton("go", "Submit")
+    ),
+    mainPanel(
+      verbatimTextOutput("result"),
+      verbatimTextOutput("recommendation")
+    )
+  )
+)
+
+function(input, output) {
+  observeEvent(input$go, {
+    new_input <- data.frame(
+      MilkYield = input$milk,
+      SCC        = input$scc,
+      AFC        = input$afc
+    )
+    prob <- predict(rf_model, newdata = new_input, type = "prob")[, "Yes"]
+    output$result <- renderText({
+      paste("Likelihood of Second Calving:", round(prob, 2))
+    })
+    output$recommendation <- renderText({
+      if (prob >= 0.75) {
+        "🟢 KEEP — High chance of second calving."
+      } else if (prob <= 0.40) {
+        "🔴 CULL — Low chance of second calving."
+      } else {
+        "🟡 MONITOR — Moderate likelihood."
+      }
+    })
+  })
+}
+```
+
+# References
+
+- Wood SN (2017). *Generalized Additive Models*.
+- Kuhn M (2008). *Caret: Classification and Regression Training*.
+- Liaw & Wiener (2002). *RandomForest R Package*.
+- Robin et al. (2011). *pROC R Package*.
