@@ -1,0 +1,647 @@
+---
+title: "C7081 Assignment"
+author: "Dan Peters"
+date: "2025-05-05"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE
+)
+
+# Load required packages
+tidy_packages <- c(
+  "tidyverse", "mgcv", "randomForest", "e1071", 
+  "pROC", "caret", "reshape2", "shiny", "doParallel"
+)
+for (pkg in tidy_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg)
+  }
+  library(pkg, character.only = TRUE)
+}
+```
+
+# Background
+
+This research uses statistical analysis tools to identify trends in the data that answer important questions to dairy farmers within the context of Precision Livestock Farming (PLF). Two things matter most to Dairy farmers: how much milk a cow produces and whether she can successfully have calves. Every additional month before a heifer has her first calf delays lifetime milk yield and increases rearing costs. (Boulton et al 2017)
+
+The dataset was selected due to the combined data from diverse sources. The data were collected by the National Bovine Data Centre and originated from lactation records of compiled by a number major milking operations. The data contains lactation and calving records for 446,523 pedigree Holstein/Holstein Friesian heifers between January 1st 2006 and December 31st 2008 (Eastham et al 2008) 
+
+Whilst Eastham et al explored similar themes in their 2008 study, this assignment seeks to develop their ideas utilising different statistical tools and with the addition of a predictive model for herd decision making in a real-world Precision Livestock Farming context.
+
+Eastham asked:
+
+1.	How does Age at First Calving influence first lactation milk yield?
+
+2.	What is the likelihood of a heifer producing a second calf.
+
+The analyses in this report take these concepts from explanation to prediction by using nonlinear models and machine learning classifiers for decision making. Instead of explaining relationships in the data, this work demonstrates how models can be used to support practical on farm decisions in real time.
+
+The differences:
+
+1.	Eastham used linear models; this project introduces non-linear additive models.
+2.	Eastham described relationships; this project builds prediction tools for on-farm decision making.
+
+The objectives:
+
+1.	How does Age at First Calving (AFC) and Somatic Cell Count (SCC) shape a heifer’s first-lactation milk yield?
+
+2.	Given a heifer’s AFC, milk yield and SCC, what is the probability she’ll go on to a second calving, and can a classifier, Random Forest (RF) or a Support Vector Machine support real-time on-farm culling or retention decisions?
+
+
+# Methods and Results
+
+**Data Preprocessing**
+
+
+The analyses were all performed in R using packages including the tidyverse, mgcv, caret, randomForest, e1071 and PRROC.
+
+Once AFC paper data.csv is loaded, the data were plotted and summarised using Exploratory Data Analysis (EDA) techniques. Four basic questions were asked prior to modelling:
+
+•	How old were the animals when they first calved?
+
+•	How much milk they gave?
+
+•	How healthy their milk was using somatic cell count?
+
+•	Whether or not she produced a second calf?
+
+
+**Exploratory Data Analysis**
+
+For clarity and in order to align with standard industry terminology some key parameters were renamed. (see {r load_and_preprocess})
+
+•	AFC  This is a key metric in dairy farming. If a heifer produces a calf too early she may not be fully grown, too late and the dairy loses productive days. Expressing this in months gives a refined approach that maps to industry standard targets of 24 – 30 months.
+
+•	MilkYield Lactation yield over 305 days is the industry benchmark for comparing the performance of animals and herds in studies.
+
+•	SCC (First lactation somatic cell count) This is the primary indicator of mammary health. Elevated SCC’s can signify mastitis or other clinical issues that can impede milk yield and productivity
+
+•	CalvingInterval (interval to second calving in days): The interval between a heifers first a second calf is a proxy for reproductive efficiency and whether an animal is culled or kept.
+
+
+```{r load_and_preprocess}
+#load dataset and rename parameters
+df <- read_csv("/Users/mac1/Documents/RStudio/C7081/AFC paper data.csv") %>%
+  rename(
+    AFC = `1CalvingAgeMo`,
+    MilkYield = `1LPYld`,
+    SCC = `1LPSCC`,
+    CalvingInterval = `2CalvingInterval`
+  ) %>%
+  mutate(
+    SecondCalving = factor(if_else(is.na(CalvingInterval), "No", "Yes"), levels = c("No", "Yes")),
+    logSCC = log10(SCC + 1)
+  ) %>%
+  filter(AFC >= 21, AFC <= 42) %>%
+  drop_na(AFC, MilkYield, SCC, SecondCalving)
+```
+
+
+
+On initial analysis, the SCC values appeared to be skewed as a small number of cows had a very high count. So log10(SCC+1) was incorporated reduce the influence of extreme outliers and to make the relationship between milk yield and calving success more linear.
+
+It was also decided to restrict the data set used for the models to biologically plausible heifers aged between 21 months and 42 months and split AFC into three categories “early” “on time “and “late” calvers to provide easily identifiable patterns in the data. 
+
+## Exploratory Data Visualisations 
+
+```{r plot_afc}
+#Plot distribution of age at first calving
+ggplot(df, aes(x = AFC)) +
+  geom_histogram(bins = 30, fill = "steelblue") +
+  labs(title = "Distribution of Age at First Calving (AFC)", x = "AFC (months)", y = "Count")
+```
+
+
+
+```{r yield_by_afc_group}
+#Plot milk yield by AFC group
+df <- df %>%
+  mutate(AFC_group = cut(AFC, breaks = c(0, 24, 30, Inf), labels = c("<=24", "25-30", ">30")))
+
+ggplot(df, aes(x = AFC_group, y = MilkYield)) +
+  geom_boxplot(fill = "lightblue") +
+  labs(title = "Milk Yield by AFC Group", x = "AFC Group", y = "305-day Milk Yield (kg)")
+```
+
+
+
+```{r plot_scc}
+#plot distribution of log10(SCC + 1)
+ggplot(df, aes(x = logSCC)) +
+  geom_histogram(bins = 30, fill = "darkgreen") +
+  labs(title = "Distribution of log10(SCC + 1)", x = "log10(SCC + 1)", y = "Count")
+```
+
+
+
+```{r second_calving_table}
+#second calving results
+df %>%
+  count(SecondCalving) %>%
+  mutate(Percent = round(n / sum(n) * 100, 1)) %>%
+  knitr::kable(col.names = c("Second Calving", "Count", "Percent"))
+```
+
+
+## Genralised Additive Models (GAMs)
+
+A GAM was selected as a tresult of the EDA revealing a non-linear AFC-yield relationship that linear models cannot capture. The exploratory data analysis used by Eastham et al showed that milk yield rises steeply as AFC moves from 21 to ~30 months but then levels off before dipping slightly. A straight line isn not sufficient to demonstrate the data effectively in relation to the take off and flatten shape of the curve. Only one smooth term for AFC is required and other predictors (logSCC) can enter linearly keeping the model easy to describe. The GAM is s transparent and easily reproducible method to model the non-linear influence of AFC on milk yield whilst still handling other factors (like SCC) in a linear fashion.
+
+
+```{r fit_gam}
+#GAM
+gam_model <- gam(MilkYield ~ s(AFC) + logSCC, data = df, method = "REML")
+summary(gam_model)
+```
+
+**Interpreting the output**
+
+```{r model-table, echo=FALSE}
+#Build model summary table
+library(knitr)
+
+# Data frame
+model_table <- data.frame(
+  Term = c("Intercept", "logSCC", "s(AFC)"),
+  `Estimate (SE) / edf` = c("7,346.21 (±5.01)", "11.21 (±3.36)", "edf = 7.87 (Ref.df 8.63)"),
+  `Test statistic` = c("t = 1,467.5", "t = 3.34", "F = 112.7"),
+  `p-value` = c("< 2×10⁻¹⁶ ***", "0.00084 ***", "< 2×10⁻¹⁶ ***")
+)
+
+# Print table
+kable(model_table, caption = "Model Summary Table")
+
+```
+
+•	Intercept ~ 7 346 kg is the expected yield at logSCC = 0 and at the “center” of the smooth.
+
+•	logSCC coefficient 11.2 means that, holding AFC constant, a ten-fold increase in SCC raises predicted yield by ~11 kg—small but statistically clear.
+
+•	edf (effective degrees of freedom) ≈ 7.9 about eight parameters—a fairly flexible curve.
+
+•	The large F and tiny p for s(AFC) confirm a highly significant non-linear effect.
+
+
+
+```{r plot_gam}
+#GAM smoothing of AFC on milk yield
+plot(gam_model, se = TRUE, shade = TRUE, main = "GAM Smoothing of AFC on Milk Yield")
+```
+
+**x=AFC in months** 
+
+**y=smooth function /effective degrees of freedom**
+
+The AFC curve:
+
+•	climbs sharply from 21 mo up to ~30 mo,
+
+•	then levels off between 30–36 mo,
+
+•	and gently declines after ~36 mo.
+
+**Overall model fit**
+
+•	Adjusted R² = 0.0025: the smooth and logSCC explain ~0.25 % of the variance. 
+
+This is low because milk yield is influenced by many other factors not included in the model. The use of machine learning classifiers later in the report should be better at processing noisy data for predictive decision making.
+
+•	RSS = 1.78×10¹² and BIC ≈ 7.20×10⁶ give absolute measures of fit and complexity—useful for comparing to alternative specifications.
+
+
+```{r gam-model-evaluation}
+#overall model fit 
+
+# RSS, Adjusted R², BIC
+rss      <- sum(residuals(gam_model)^2)
+adj_r2   <- summary(gam_model)$r.sq
+bic_val  <- BIC(gam_model)
+
+cat("RSS:", round(rss, 2), "\n")
+cat("Adjusted R²:", round(adj_r2, 4), "\n")
+cat("BIC:", round(bic_val, 2), "\n")
+```
+
+
+
+
+## Predictive Modeling
+
+### Data split and model fitting
+
+To predict whether a heifer was likely to produce a second calf two models were employed. With 3960,000 records it is not feasible on this occasion to train and test on all of them due to the computational cost and the required reproducibility, for this reason, the training and testing split was taken from a sample of 5,000 records to fulfill the brief. The data were split in to set of 70% training data and 30% test data.
+
+**Random Forest**
+After some research a Random Forest was selected as the primary classification model as they work effectively with large data sets and are capable of handling complex patterns amongst variables. A random tree model provided many benefits including avoidance of over fitting through internal bootstrapping, the ranking of variables in order of importance, a confidence score and the automatic capture of non-linear patterns ((Brieman L 2001)
+
+**Linear Support Vector Machine (SVM)**
+
+An SVM was used as a comparison because they use a completely different method to classify outcomes. Instead of building many trees, SVMs try to draw the best possible line (or hyperplane) between the cows that calved again and those that didn’t. They do this by maximizing the margin — or distance — between the two groups. SVMs are useful when there are a considerable amount of variables classes. Adding an SVM provided a second, very different way to test predictions. This ensures that results aren’t overly dependent on just one model type, which strengthens overall conclusions. (Cortes, C .1995)
+
+
+```{r modeling-setup}
+
+#Repeatable random sampling. 
+#Create df_model. 
+#Take random sample of 5000 cows. 
+#Split test/train data
+
+set.seed(2025)
+df_model <- df[, c("SecondCalving", "MilkYield", "SCC", "AFC")]
+df_small <- df_model %>% sample_n(5000)
+train_idx <- createDataPartition(df_small$SecondCalving, p = 0.7, list = FALSE)
+train     <- df_small[train_idx, ]
+test      <- df_small[-train_idx, ]
+
+# Random Forest (with predictions)
+rf_model <- randomForest(SecondCalving ~ ., data = train,
+                         ntree = 100, mtry = 2)
+rf_probs <- predict(rf_model, test, type = "prob")[, "Yes"]
+rf_preds <- predict(rf_model, test)
+rf_auc   <- roc(test$SecondCalving, rf_probs)$auc
+
+# SVM (linear, with predictions)
+svm_model <- svm(SecondCalving ~ ., data = train,
+                 kernel = "linear", cost = 1, probability = TRUE)
+svm_probs <- attr(predict(svm_model, test, probability = TRUE),
+                  "probabilities")[, "Yes"]
+svm_preds <- predict(svm_model, test)
+svm_auc   <- roc(test$SecondCalving, svm_probs)$auc
+
+# Print performance summary
+data.frame(
+  Model    = c("Random Forest", "SVM"),
+  Accuracy = c(mean(rf_preds == test$SecondCalving),
+               mean(svm_preds == test$SecondCalving)),
+  AUC      = c(rf_auc, svm_auc)
+)
+```
+
+### Confusion Matrices
+
+Confusion matrices were employed to evaluate the performance of the classification models (SVM and RF) n their ability to predict whether a heifer is likely to produce a second calf. Confusion matrices break down the models performance into 4 categories for a more detailed assessment of well the model identifies each class. The categories are:
+
+1. True positives
+
+2. True negatives
+
+3. False positives
+
+4. False negatives
+
+This evaluation highlighted that both of the models showed high sensitivity (ability to correctly identify heifers that did calve again) but comparatively low specificity (ability to identify those that did not).
+
+
+```{r confusion-matrix-fixed}
+#Confusion Matrix
+cm_rf  <- confusionMatrix(rf_preds, test$SecondCalving,  positive = "Yes")
+cm_svm <- confusionMatrix(svm_preds, test$SecondCalving, positive = "Yes")
+
+print(cm_rf)
+print(cm_svm)
+```
+
+**•	RF
+
+o	Sensitivity: 96.6 %
+
+o	Specificity: 30.4 %
+
+o	PPV: 85.6 %
+
+**•	SVM
+
+o	Sensitivity: 99.3 %
+
+o	Specificity: 24.0 %
+
+o	PPV: 84.9 %
+
+
+
+
+# Diagnostic Plots
+
+```{r diagnostic-plot-summary, echo=FALSE, results='asis'}
+# Create the diagnostic summary table
+diagnostic_table <- data.frame(
+  `Plot Type` = c(
+    "ROC Curve",
+    "Precision-Recall Curve",
+    "Threshold Sensitivity",
+    "Confusion Matrix Heatmap"
+  ),
+  Purpose = c(
+    "Shows trade-off between sensitivity and specificity",
+    "Highlights performance on minority class (“No” calving)",
+    "Examines how threshold choice impacts accuracy, sensitivity, specificity",
+    "Visualises prediction errors by class"
+  ),
+  `Insight Gained` = c(
+    "SVM had slightly higher AUC, indicating better discrimination than RF",
+    "RF curve showed drop in precision at lower thresholds, important for culling",
+    "Optimal decision threshold identified (~0.50); reveals trade-offs at extremes",
+    "RF over-predicted 'Yes'; helpful for evaluating misclassification bias"
+  ),
+  stringsAsFactors = FALSE
+)
+
+# Display table using knitr::kable
+knitr::kable(diagnostic_table, caption = "Summary of Diagnostic Plots Used for Model Evaluation")
+```
+
+
+
+```{r confusion-matrix-heatmap}
+# Convert confusion matrix to long format
+tab <- as.data.frame(cm_rf$table)
+colnames(tab) <- c("Prediction", "Reference", "Freq")
+
+# Plot heatmap
+ggplot(tab, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Freq), size = 5) +
+  scale_fill_gradient(low = "white", high = "steelblue") +
+  labs(
+    title = "Confusion Matrix Heatmap: Random Forest",
+    x = "Actual Class", y = "Predicted Class"
+  ) +
+  theme_minimal()
+```
+
+
+### Receiver Operating Characheristic (ROC Curve)
+
+```{r roc-curve}
+# Compute ROC object and plot
+roc_rf <- roc(test$SecondCalving, rf_probs)
+plot(roc_rf, main = "ROC Curve: Random Forest")
+auc(roc_rf)
+```
+**ROC curves confirmed moderate discrimination (RF AUC = 0.6606; SVM AUC = 0.6835)**
+
+The ROC curve plots:
+
+True Positive Rate (Sensitivity) on the Y-axis — how well the model catches cows that did calve again.
+
+False Positive Rate (1 – Specificity) on the X-axis — how often the model incorrectly predicts that a cow would calve again when she did not.
+
+This shows that the SVM was slightly better at telling the cows that would calve again from the cows that would not. It was more accurate at overall in in making this yes or no decision.
+
+### Precision-Recall Curve
+
+```{r pr-curve}
+# Use PRROC package for precision-recall curve
+if (!requireNamespace("PRROC", quietly = TRUE)) install.packages("PRROC")
+library(PRROC)
+
+# Compute PR curve
+pr_rf <- pr.curve(
+  scores.class0 = rf_probs[test$SecondCalving == "Yes"],
+  scores.class1 = rf_probs[test$SecondCalving == "No"],
+  curve = TRUE
+)
+# Plot PR curve
+plot(pr_rf, main = "Precision-Recall Curve: Random Forest")
+```
+**Precision-Recall curve for RF highlighted performance on the minority “No” class.**
+
+This plot showed that the Rf was effective at identifying cows that would not calve again but also sometimes wrongly predicted them.
+
+The PR curve plots:
+
+Precision (Positive Predictive Value) on the Y-axis:
+
+Of the heifers that the model predicted would calve again, how many actually did?
+
+Recall (Sensitivity) on the X-axis:
+
+Of the heifers that did calve again, how many did the model correctly identify?
+
+
+High recall = you catch most cows that calved again
+
+High precision = most of the cows you predicted would calve again actually did
+
+
+### Threshold Sensitivity Analysis
+
+```{r threshold-analysis-fixed}
+#Threshold analysis 
+
+threshold_analysis <- function(probs, truth, thresh) {
+  preds <- factor(if_else(probs > thresh, "Yes", "No"), levels = c("No", "Yes"))
+  cm    <- confusionMatrix(preds, truth, positive = "Yes")
+  data.frame(
+    Threshold   = thresh,
+    Accuracy    = cm$overall["Accuracy"],
+    Sensitivity = cm$byClass["Sensitivity"],
+    Specificity = cm$byClass["Specificity"]
+  )
+}
+
+thresholds <- seq(0.3, 0.8, by = 0.05)
+results_rf  <- bind_rows(lapply(thresholds, threshold_analysis, probs = rf_probs, truth = test$SecondCalving))
+
+# Plot
+library(ggplot2)
+ggplot(results_rf, aes(x = Threshold)) +
+  geom_line(aes(y = Accuracy),    size = 1) +
+  geom_line(aes(y = Sensitivity), size = 1, linetype = "dashed") +
+  geom_line(aes(y = Specificity), size = 1, linetype = "dotted") +
+  labs(title = "Threshold Sensitivity Analysis: Random Forest",
+       y = "Metric Value", x = "Threshold") +
+  theme_minimal()
+```
+**Threshold analysis (0.30–0.80): optimal overall accuracy occurred near a 0.50 cut-off, while sensitivity and specificity diverged sharply at extremes**
+
+Threshold sensitivity analysis involves systematically testing different thresholds (e.g., from 0.30 to 0.80) and measuring how this affects:
+
+Straight Line. Accuracy (overall correct predictions), 
+
+Dashed Line. Sensitivity (correctly identifying cows that do calve again),
+
+Dotted line Specificity (correctly identifying cows that do not calve again).
+
+### Model Performance Comparison Plot
+
+```{r model-performance-plot-fixed}
+#Plot model perfoprmance metrics
+
+model_performance <- tibble(
+  Model    = rep(c("Random Forest", "SVM"), each = 2),
+  Metric   = rep(c("Accuracy", "AUC"), times = 2),
+  Value    = c(mean(rf_preds == test$SecondCalving), rf_auc,
+               mean(svm_preds == test$SecondCalving), svm_auc)
+)
+
+ggplot(model_performance, aes(x = Metric, y = Value, fill = Model)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  ylim(0, 1) +
+  labs(
+    title = "Model Performance Comparison: Accuracy and AUC",
+    y     = "Score",
+    x     = "Metric"
+  ) +
+  theme_minimal()
+```
+**Bar plot comparing Accuracy vs. AUC side-by-side emphasized SVM’s slight edge in both metrics**
+
+
+
+## Choosing the Best Model
+
+To efficiently tune and compare multiple models without additional packages, we use caret with parallel processing and resamples
+
+**Hyperparameter Tuning and Model Selection**
+
+Using caret::train with repeated 10-fold CV on a 2 000-record subset (parallelised across cores):
+
+•	Tuned RF (mtry grid) & SVM (cost grid) for ROC.
+
+•	Best cross-validated mean ROC:
+
+o	RF ≈ 0.712
+
+o	SVM ≈ 0.724
+
+The linear SVM was selected as the final classifier based on superior tuned ROC.
+
+
+```{r choose-best-model-caret-efficient}
+# Parallel backend and sampling to speed up tuning
+library(doParallel)
+cl <- makePSOCKcluster(detectCores() - 1)
+registerDoParallel(cl)
+
+# Sample subset of training data for faster tuning
+set.seed(2025)
+sample_size   <- min(nrow(train), 2000)
+train_sample  <- train %>% sample_n(sample_size)
+
+# Repeated 10-fold cross-validation on subset
+ctrl <- trainControl(
+  method = "repeatedcv",
+  number = 10,
+  repeats = 3,
+  classProbs = TRUE,
+  summaryFunction = twoClassSummary
+)
+
+# Tune Random Forest on sampled data
+rf_train <- train(
+  SecondCalving ~ ., data = train_sample,
+  method = "rf",
+  metric = "ROC",
+  trControl = ctrl,
+  tuneLength = 5
+)
+
+# Tune linear SVM on sampled data
+svm_train <- train(
+  SecondCalving ~ ., data = train_sample,
+  method = "svmLinear",
+  metric = "ROC",
+  trControl = ctrl,
+  tuneLength = 5
+)
+
+# Compare best ROC values directly
+rf_best  <- max(rf_train$results$ROC)
+svm_best <- max(svm_train$results$ROC)
+
+best_mod_name <- if (rf_best >= svm_best) "Random Forest" else "SVM"
+best_roc      <- if (rf_best >= svm_best) rf_best else svm_best
+
+cat("Best model by sampled tuning: ", best_mod_name,
+    " with ROC =", round(best_roc, 3), "
+")
+
+# Stop parallel backend
+stopCluster(cl)
+```
+
+
+# Conclusion
+
+1.	Age at First Calving (AFC) has a highly significant but subtle non-linear influence on a heifers first-lactation yield, with maximum returns around 30 months. The data show that the age of a heifer when she first gives birth can affect how much milk she produces in her first lactation cycle. Milk yield tends to increase sharply as the age of first calving rises from 12 months up to around 30 months. Milk yield levels off at this point and starts to decline for heifers beyond 36 months.
+
+2.	Somatic cell count has a modest positive association with yield after log-transformation. Although an  almost insignificant increase in milk yield, this does appear counter intuitive and requires further investigation
+
+3.	Second-calving prediction: both RF and SVM achieve >84 % accuracy, but specificity is low. SVM provides slightly better discrimination (AUC up to 0.724 after tuning). The low specificity requires further fine tuning techniques or experimentation.
+
+4.	Visual diagnostics (GAM plots, ROC/PR curves, heatmaps, threshold curves) clearly communicate model behaviors and support transparent decision-making.
+
+
+
+# Farmers Tool
+
+An example of real world deployment.
+
+```{r shiny-farmer-interface, echo=FALSE}
+#Create a GUI
+fluidPage(
+  titlePanel("Should I Keep or Cull This Cow?"),
+  sidebarLayout(
+    sidebarPanel(
+      numericInput("milk", "Milk Yield (kg):",  value = 5000, min = 2000, max = 12000),
+      numericInput("scc",  "Somatic Cell Count (SCC):", value = 150,  min = 50,   max = 1000),
+      numericInput("afc",  "Age at First Calving (months):", value = 30,   min = 18,   max = 48),
+      actionButton("go", "Submit")
+    ),
+    mainPanel(
+      verbatimTextOutput("result"),
+      verbatimTextOutput("recommendation")
+    )
+  )
+)
+
+function(input, output) {
+  observeEvent(input$go, {
+    new_input <- data.frame(
+      MilkYield = input$milk,
+      SCC        = input$scc,
+      AFC        = input$afc
+    )
+    prob <- predict(rf_model, newdata = new_input, type = "prob")[, "Yes"]
+    output$result <- renderText({
+      paste("Likelihood of Second Calving:", round(prob, 2))
+    })
+    output$recommendation <- renderText({
+      if (prob >= 0.75) {
+        "🟢 KEEP — High chance of second calving."
+      } else if (prob <= 0.40) {
+        "🔴 CULL — Low chance of second calving."
+      } else {
+        "🟡 MONITOR — Moderate likelihood."
+      }
+    })
+  })
+}
+```
+
+# References
+
+Boulton, A.C., Rushton, J. and Wathes, D.C. (2017) ‘An empirical analysis of the cost of rearing dairy heifers from birth to first calving and the time taken to repay these costs’, Animal, 11(8), pp. 1372–1380.
+
+Breiman, L. (2001) ‘Random Forests’, Machine Learning, 45(1).
+
+Cortes, C. and Vapnik, V. (1995) ‘Support-vector networks’, Machine Learning, 20(3).
+
+Grau, J., Grosse, I. and Keilwagen, J. (2015) ‘PRROC: computing and visualizing precision-recall and receiver operating characteristic curves in R’, Bioinformatics, 31(15).
+
+Kuhn, M. (2008) ‘Building predictive models in R using the caret package’, Journal of Statistical Software, 28(5), pp. 1–26. Available at: https://www.jstatsoft.org/v028/i05 (Accessed: 15 April 2025).
+
+Liaw, A. and Wiener, M. (2002) ‘Classification and regression by randomForest’, R News, 2(3), pp. 18–22. Available at: https://journal.r-project.org/articles/RN-2002-022/RN-2002-022.pdf (Accessed: 16 April 2025).
+
+Robin, X., Turck, N., Hainard, A., Tiberti, N., Lisacek, F., Sanchez, J.C. and Müller, M. (2011) ‘pROC: an open-source package for R and S+ to analyze and compare ROC curves’, BMC Bioinformatics, 12, article no. 77. Available at: https://bmcbioinformatics.biomedcentral.com/articles/10.1186/1471-2105-12-77 (Accessed: 16 April 2025).
+
+Wood, S.N. (2017) Generalized additive models: an introduction with R. 2nd edn. Boca Raton: CRC Press.
