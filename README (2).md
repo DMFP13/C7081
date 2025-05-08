@@ -14,7 +14,8 @@
 You can view the full analysis and reproducible RMarkdown report here:  
 [RPubs Report Link](https://rpubs.com/DanJPeters/1307449)
 
-The reproducible code can be copied into R Studio and reproduced from here: 24353200 reproducible code
+The reproducible code can be copied into R Studio and reproduced from this repository: 24353200 reproducible code
+
 The data file can be downloaded from here: (https://drive.google.com/file/d/1fG1LUt5qPgOXKL47puUJZjB7VDR5SH4J/view?usp=drive_link)
 
 ## Project Overview
