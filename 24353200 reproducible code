@@ -89,7 +89,7 @@ For clarity and in order to align with standard industry terminology some key pa
 
 ```{r load_and_preprocess}
 #load dataset and rename parameters
-df <- read_csv("/Users/mac1/Documents/RStudio/C7081/AFC paper data.csv") %>%
+df <- read_csv("Download data file and insert local link here") %>%
   rename(
     AFC = `1CalvingAgeMo`,
     MilkYield = `1LPYld`,
