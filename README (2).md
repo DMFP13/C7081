@@ -4,18 +4,19 @@
 **Student Number:** 24353200  
 **Module Code:** C7081 – Statistical Analysis for Data Science  
 **Submission Date:** 08 May 2025  
-**Institution:** Harper Adams University  
 
-## 📊 Project Title
+## Project Title
 
 **Predicting Second Calving and Milk Yield Using GAM and Machine Learning in Dairy Cows**
 
-## 🔗 Project Link
+## Project Link
 
 You can view the full analysis and reproducible RMarkdown report here:  
-👉 [RPubs Report Link](https://rpubs.com/DanJPeters/1307449)
+[RPubs Report Link](https://rpubs.com/DanJPeters/1307449)
 
-## 📝 Project Overview
+The reproducible code can be copied into R Studio and reproduced from here: 24353200 reproducible code
+
+## Project Overview
 
 This project explores key predictors of dairy cow productivity — namely, milk yield and likelihood of a second calving — using a real-world dataset of over 400,000 pedigree heifers. The analysis uses:
 
@@ -24,7 +25,7 @@ This project explores key predictors of dairy cow productivity — namely, milk 
 
 This work is grounded in the real-world priorities of **Precision Livestock Farming (PLF)** and aims to support practical on-farm decision-making through data science tools.
 
-## 📂 Contents
+## Contents
 
 The RPubs link contains:
 - Background and objectives
@@ -36,6 +37,4 @@ The RPubs link contains:
 - Conclusion and recommendations
 - References
 
-## 🤖 AI Use Declaration
 
-Artificial Intelligence (ChatGPT) was used only during the idea development phase of this project to explore suitable modelling approaches and explain statistical outputs. No AI tools were used to write or refine the final submission. All statistical analysis, code, and interpretations are the original work of the author.
